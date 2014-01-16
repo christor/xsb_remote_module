@@ -63,18 +63,32 @@ download_archive_file(RepositoryPath, ArtifactFilename, LocalDownloadPath) :-
 	member(Repo, Repositories),
 	concat_atom([Repo, '/', RepositoryPath, '/', ArtifactFilename], Url),
 	maven_home(MavenHome),
-	concat_atom([MavenHome, '/repository/', RepositoryPath, '/', ArtifactFilename], LocalDownloadPath),
+	concat_atom([MavenHome, '/repository/', RepositoryPath], LocalDownloadDir),
+	concat_atom([LocalDownloadDir, '/', ArtifactFilename], LocalDownloadPath),
 	( file_exists(LocalDownloadPath) -> 
 	    true ;
-	    write(userout, ['attempting to download ', ArtifactFilename, ' from ', Url, '...']),
-	    shell(['mkdir -p ',RepositoryPath]),
-	    shell(['curl -s ', Url, ' -o ', LocalDownloadPath]),
-	    (file_exists(LocalDownloadPath) ->
-		writeln('done') ;
-		writeln('failed'),
+            concat_atom(['attempting to download ', ArtifactFilename, ' from ', Url, ' ... '], ErrMsg),
+	    write(userout, ErrMsg),
+	    mkdirs(LocalDownloadDir),
+	    (download_file(Url, LocalDownloadPath) ->
+		writeln('Done') ;
+		writeln('Failed'),
 		fail
 	    )
 	).
+
+mkdirs(Dir) :-
+    shell(['mkdir -p ', Dir], Result),
+    ( Result = 0
+    -> true
+    ; fail).
+    
+download_file(Url, ToFile) :-
+    shell(['curl -f -s ', Url, ' -o ', ToFile], Result),
+    ( Result = 0
+    -> true
+    ; fail).
+    
 
 unzip_archive_file(ZipFile, RepositoryPath, ExtractedPath) :-
 	module_cache_dir(CacheDir),
