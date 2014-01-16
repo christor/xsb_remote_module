@@ -1,0 +1,110 @@
+:- compiler_options([xpp_on]).
+#include "standard.h"
+
+:- export add_remote_lib_dir/2.
+:- export add_remote_repository/1.
+:- export remote_repository/1.
+
+:- import member/2, 
+	  length/2 from basics.
+:- import getenv/2 from machine.
+:- import concat_atom/2 from string.
+
+:- dynamic dyn_remote_repository/1.
+
+module_cache_dir(ModuleCache) :-
+	(getenv('XSB_MODULE_CACHE', ModuleCache),!)
+    ;
+	(getenv('HOME', Home),concat_atom([Home,'/.xsbmodules'],ModuleCache),!).
+
+maven_home(X) :-
+	getenv('MAVEN_HOME',X).
+maven_home(X) :-
+	getenv('M2_HOME',X).
+maven_home(X) :-
+	getenv('HOME',P),
+	concat_atom([P,'/.m2'],X).
+
+add_remote_repository(Url) :-
+	assert(dyn_remote_repository(Url)).
+
+remote_repository(X) :-
+	dyn_remote_repository(X).
+remote_repository(X) :-
+	getenv('XSB_REMOTE_REPOSITORY', X).
+remote_repositories(Repositories) :-
+	findall(X,remote_repository(X),Repositories),
+	length(Repositories, L),
+	(
+	    L =:= 0 ->
+	    writeln(STDERR, 'No remote repository set. Use add_remote_repository/1 or set the environment variable XSB_REMOTE_REPOSITORY'),
+	    fail;
+	    true
+	).
+
+add_remote_lib_dir(GAV, FilePath) :-
+	basics:member(g=GroupId, GAV),
+	basics:member(a=ArtifactId, GAV),
+	basics:member(v=Version, GAV),
+	repository_path(GroupId, ArtifactId, Version, RepositoryDir, ArtifactFilename),
+
+	download_archive_file(RepositoryDir, ArtifactFilename, LocalArchiveFile),
+	unzip_archive_file(LocalArchiveFile, RepositoryDir, ExtractedPath),
+
+	consult:add_lib_dir([ExtractedPath,'/',FilePath]).
+
+repository_path(GroupId, ArtifactId, Version, RepositoryDir, ArtifactFilename) :-
+	atom_dot_to_slash(GroupId,GroupPath),
+	concat_atom([GroupPath,'/',ArtifactId,'/',Version],RepositoryDir),
+	concat_atom([ArtifactId,'-',Version,'.jar'],ArtifactFilename).
+	
+download_archive_file(RepositoryPath, ArtifactFilename, LocalDownloadPath) :-
+	remote_repositories(Repositories),
+	member(Repo, Repositories),
+	concat_atom([Repo, '/', RepositoryPath, '/', ArtifactFilename], Url),
+	maven_home(MavenHome),
+	concat_atom([MavenHome, '/repository/', RepositoryPath, '/', ArtifactFilename], LocalDownloadPath),
+	( file_exists(LocalDownloadPath) -> 
+	    true ;
+	    write(userout, ['attempting to download ', ArtifactFilename, ' from ', Url, '...']),
+	    shell(['mkdir -p ',RepositoryPath]),
+	    shell(['curl -s ', Url, ' -o ', LocalDownloadPath]),
+	    (file_exists(LocalDownloadPath) ->
+		writeln('done') ;
+		writeln('failed'),
+		fail
+	    )
+	).
+
+unzip_archive_file(ZipFile, RepositoryPath, ExtractedPath) :-
+	module_cache_dir(CacheDir),
+	concat_atom([CacheDir,'/',RepositoryPath], ExtractedPath),	
+	shell(['mkdir -p ', ExtractedPath]),
+	shell(['unzip -q -u ', ZipFile, ' -d ', ExtractedPath]).
+
+atom_dot_to_slash(Input, Output) :-
+	atom_codes(Input, InputCodes),
+	dot_to_slash(InputCodes, OutputCodes),
+	atom_codes(Output, OutputCodes).
+
+dot_to_slash([],[]).
+dot_to_slash([0'.'|RestIn], [0'/'|RestOut]) :- !, dot_to_slash(RestIn,RestOut).
+dot_to_slash([X|RestIn],[X|RestOut]) :- dot_to_slash(RestIn,RestOut).
+
+
+/* ...something like this should work, but doesn't seem to work reliably...
+download_archive_file(Url, RepositoryPath, LocalDownloadPath) :-
+	open(url(Url),read,R,[redirect(true)]),
+	open(ArchiveFile, write, W),
+	repeat,
+	get_code(R,C),
+	( at_end_of_stream(R) ->
+	    !,
+	    flush_output(W),
+	    close(W),
+	    close(R),
+	    true;
+	    put_code(W,C),
+	    fail
+	).
+*/
