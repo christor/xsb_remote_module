@@ -6,14 +6,18 @@
 :- export remote_repository/1.
 
 :- import member/2, 
-	  length/2 from basics.
+	  length/2 
+     from basics.
+:- import conset/2,
+          coninc/2
+     from gensym.
 :- import getenv/2 from machine.
 :- import concat_atom/2 from string.
 
 :- dynamic dyn_remote_repository/1.
 
 module_cache_dir(ModuleCache) :-
-	(getenv('XSB_MODULE_CACHE', ModuleCache),!)
+	(getenv('XSB_MODULE_CACHE', ModuleCache), !)
     ;
 	(getenv('HOME', Home),concat_atom([Home,'/.xsbmodules'],ModuleCache),!).
 
@@ -69,8 +73,9 @@ download_archive_file(RepositoryPath, ArtifactFilename, LocalDownloadPath) :-
 	    true ;
             concat_atom(['attempting to download ', ArtifactFilename, ' from ', Url, ' ... '], ErrMsg),
 	    write(userout, ErrMsg),
-	    mkdirs(LocalDownloadDir),
-	    (download_file(Url, LocalDownloadPath) ->
+	    (download_file(Url, TempFile) ->
+                mkdirs(LocalDownloadDir),
+                path_sysop(rename, TempFile, LocalDownloadPath),
 		writeln('Done') ;
 		writeln('Failed'),
 		fail
@@ -83,8 +88,9 @@ mkdirs(Dir) :-
     -> true
     ; fail).
     
-download_file(Url, ToFile) :-
-    shell(['curl -f -s ', Url, ' -o ', ToFile], Result),
+download_file(Url, TempFile) :-
+    create_temp_file(TempFile),
+    shell(['curl -f -s ', Url, ' -o ', TempFile], Result),
     ( Result = 0
     -> true
     ; fail).
@@ -92,9 +98,11 @@ download_file(Url, ToFile) :-
 
 unzip_archive_file(ZipFile, RepositoryPath, ExtractedPath) :-
 	module_cache_dir(CacheDir),
-	concat_atom([CacheDir,'/',RepositoryPath], ExtractedPath),	
-	shell(['mkdir -p ', ExtractedPath]),
-	shell(['unzip -q -u ', ZipFile, ' -d ', ExtractedPath]).
+	concat_atom([CacheDir,'/',RepositoryPath], ExtractedPath),
+        (file_exists(ExtractedPath)
+        ->  true
+	;   shell(['mkdir -p ', ExtractedPath]),
+	    shell(['unzip -q -u ', ZipFile, ' -d ', ExtractedPath])).
 
 atom_dot_to_slash(Input, Output) :-
 	atom_codes(Input, InputCodes),
@@ -102,23 +110,24 @@ atom_dot_to_slash(Input, Output) :-
 	atom_codes(Output, OutputCodes).
 
 dot_to_slash([],[]).
-dot_to_slash([0'.'|RestIn], [0'/'|RestOut]) :- !, dot_to_slash(RestIn,RestOut).
+% GPP is confused by 0'.' and 0'/' ???
+dot_to_slash([D|RestIn], [S|RestOut]) :- "."=[D],"/"=[S],!, dot_to_slash(RestIn,RestOut).
 dot_to_slash([X|RestIn],[X|RestOut]) :- dot_to_slash(RestIn,RestOut).
 
+create_temp_file(TempFile) :-
+    get_temp_dir(TempDir),
+    create_temp_file(TempDir, TempFile).
 
-/* ...something like this should work, but doesn't seem to work reliably...
-download_archive_file(Url, RepositoryPath, LocalDownloadPath) :-
-	open(url(Url),read,R,[redirect(true)]),
-	open(ArchiveFile, write, W),
-	repeat,
-	get_code(R,C),
-	( at_end_of_stream(R) ->
-	    !,
-	    flush_output(W),
-	    close(W),
-	    close(R),
-	    true;
-	    put_code(W,C),
-	    fail
-	).
-*/
+create_temp_file(Prefix, TempFile) :-
+   repeat,
+   coninc('_tmp_file_cnt', X),
+   number_codes(X, Xc),
+   expand_filename([Prefix, Xc, '.txt'], TempFile),
+   (file_exists(TempFile)
+   ->  fail
+   ;   !,true).
+
+get_temp_dir(TempDir) :-
+    module_cache_dir(ModuleCacheDir),
+    concat_atom([ModuleCacheDir, '/', tmp], TempDir),
+    mkdirs(TempDir).
