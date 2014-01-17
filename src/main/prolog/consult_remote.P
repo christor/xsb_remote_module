@@ -16,28 +16,48 @@
 
 :- dynamic dyn_remote_repository/1.
 
+/**
+ * Returns the local directory into which downloaded archives are expanded
+ * so that XSB can use them in its library path
+ */
 module_cache_dir(ModuleCache) :-
 	(getenv('XSB_MODULE_CACHE', ModuleCache), !)
     ;
 	(getenv('HOME', Home),concat_atom([Home,'/.xsbmodules'],ModuleCache),!).
 
+/**
+ * Returns the local directory in which the downloaded archives are stored
+ */
 maven_home(X) :-
-	getenv('MAVEN_HOME',X).
+	getenv('MAVEN_HOME',X), !.
 maven_home(X) :-
-	getenv('M2_HOME',X).
+	getenv('M2_HOME',X), !.
 maven_home(X) :-
-	getenv('HOME',P),
+	getenv('HOME',P), !,
 	concat_atom([P,'/.m2'],X).
 
+/**
+ * Adds the Url to the list of sources from which we should attempt to download
+ * archives.
+ */
 add_remote_repository(Url) :-
 	assert(dyn_remote_repository(Url)).
 
-remote_repository(X) :-
-	dyn_remote_repository(X).
-remote_repository(X) :-
-	getenv('XSB_REMOTE_REPOSITORY', X).
+/**
+ * Returns one of the known remote repositories from which we should attempt to
+ * download archives
+ */
+remote_repository(RemoteRepository) :-
+	dyn_remote_repository(RemoteRepository).
+remote_repository(RemoteRepository) :-
+	getenv('XSB_REMOTE_REPOSITORY', RemoteRepository).
+
+/**
+ * Returns a list containing all repositories from which we should attempt to
+ * download archives. Fails if the list is empty.
+ */
 remote_repositories(Repositories) :-
-	findall(X,remote_repository(X),Repositories),
+	setof(X,remote_repository(X),Repositories),
 	length(Repositories, L),
 	(
 	    L =:= 0 ->
@@ -46,64 +66,122 @@ remote_repositories(Repositories) :-
 	    true
 	).
 
+/**
+ * Adds to XSB's library directory the path FilePath within the archive
+ * specified by the GAV parameter. The GAV parameter is a list containing:
+ *
+ *     g=GroupId
+ *     a=ArtifactId
+ *     v=Version
+ * 
+ * Taken together, these specify the path of the archive within the Maven
+ * repository (both remote and local) relative to its root.
+ */
 add_remote_lib_dir(GAV, FilePath) :-
 	basics:member(g=GroupId, GAV),
 	basics:member(a=ArtifactId, GAV),
 	basics:member(v=Version, GAV),
 	repository_path(GroupId, ArtifactId, Version, RepositoryDir, ArtifactFilename),
 
-	download_archive_file(RepositoryDir, ArtifactFilename, LocalArchiveFile),
-	unzip_archive_file(LocalArchiveFile, RepositoryDir, ExtractedPath),
+        local_module_cache_dir(RepositoryDir, ExtractedPath),
+        (file_exists(ExtractedPath)
+        ->   true
+        ;    local_maven_cache_artifact_path(RepositoryDir, ArtifactFilename, LocalArchiveFile),
+            (file_exists(LocalArchiveFile)
+            ->  true
+            ;   download_archive_file(RepositoryDir, ArtifactFilename, LocalArchiveFile)
+            ),
+            unzip_archive_file(LocalArchiveFile, ExtractedPath)
+        ),
 
 	consult:add_lib_dir([ExtractedPath,'/',FilePath]).
 
+/**
+ * For the given GroupId, ArtifactId and Version
+ * returns the artifact's simple filename in ArchiveFilename
+ * and the directory that contains it in RepositoryDir
+ */ 
 repository_path(GroupId, ArtifactId, Version, RepositoryDir, ArtifactFilename) :-
 	atom_dot_to_slash(GroupId,GroupPath),
 	concat_atom([GroupPath,'/',ArtifactId,'/',Version],RepositoryDir),
 	concat_atom([ArtifactId,'-',Version,'.jar'],ArtifactFilename).
 	
+/**
+ * Searches all known report repositories for the file with the specified
+ * RepositoryPath and ArtifactFilename. If such a file can be found, this file
+ * is saved to LocalDownloadPath. Otherwise fails.
+ */
 download_archive_file(RepositoryPath, ArtifactFilename, LocalDownloadPath) :-
 	remote_repositories(Repositories),
 	member(Repo, Repositories),
 	concat_atom([Repo, '/', RepositoryPath, '/', ArtifactFilename], Url),
-	maven_home(MavenHome),
-	concat_atom([MavenHome, '/repository/', RepositoryPath], LocalDownloadDir),
-	concat_atom([LocalDownloadDir, '/', ArtifactFilename], LocalDownloadPath),
-	( file_exists(LocalDownloadPath) -> 
-	    true ;
-            concat_atom(['attempting to download ', ArtifactFilename, ' from ', Url, ' ... '], ErrMsg),
-	    write(userout, ErrMsg),
-	    (download_file(Url, TempFile) ->
-                mkdirs(LocalDownloadDir),
-                path_sysop(rename, TempFile, LocalDownloadPath),
-		writeln('Done') ;
-		writeln('Failed'),
-		fail
-	    )
+        concat_atom(['attempting to download ', ArtifactFilename, ' from ', Url, ' ... '], ErrMsg),
+        write(userout, ErrMsg),
+        (download_file(Url, TempFile) 
+        ->  local_maven_cache_artifact_dir(RepositoryPath, ArtifactFilename, LocalDownloadDir),
+            mkdirs(LocalDownloadDir),
+            path_sysop(rename, TempFile, LocalDownloadPath),
+            writeln('Done') ;
+            writeln('Failed'),
+            fail
 	).
 
+/**
+ * Ensures the directory specified exists, or fails.
+ */
 mkdirs(Dir) :-
     shell(['mkdir -p ', Dir], Result),
     ( Result = 0
     -> true
     ; fail).
-    
+   
+/**
+ * Downloads the Url and saves it to TempFile.
+ * Fails if the file could not be downloaded.
+ */ 
 download_file(Url, TempFile) :-
-    create_temp_file(TempFile),
+    generate_temp_filename(TempFile),
     shell(['curl -f -s ', Url, ' -o ', TempFile], Result),
     ( Result = 0
     -> true
     ; fail).
-    
 
-unzip_archive_file(ZipFile, RepositoryPath, ExtractedPath) :-
+/**
+ * Returns in LocalDownloadPath the full local path within the local maven
+ * cache for the specified RepositoryPath and ArtifactFilename.
+ */    
+local_maven_cache_artifact_path(RepositoryPath, ArtifactFilename, LocalDownloadPath) :-
+        local_maven_cache_artifact_dir(RepositoryPath, ArtifactFilename, LocalDownloadDir),
+	concat_atom([LocalDownloadDir, '/', ArtifactFilename], LocalDownloadPath).
+
+/**
+ * Returns in LocalDownloadDir the full local path into which the artifact 
+ * is saved.
+ */    
+local_maven_cache_artifact_dir(RepositoryPath, ArtifactFilename, LocalDownloadDir) :-
+	maven_home(MavenHome),
+	concat_atom([MavenHome, '/repository/', RepositoryPath], LocalDownloadDir).
+
+/**
+ * Returns the local directory into the files in the archive corresponding to
+ * RepositoryPath should be extracted.
+ */
+local_module_cache_dir(RepositoryPath, ExtractedPath) :-
 	module_cache_dir(CacheDir),
-	concat_atom([CacheDir,'/',RepositoryPath], ExtractedPath),
+	concat_atom([CacheDir,'/',RepositoryPath], ExtractedPath).
+
+/**
+ * Extracts the ZipFile into the directory specified by ExtractedPath.
+ */
+unzip_archive_file(ZipFile, ExtractedPath) :-
         (file_exists(ExtractedPath)
         ->  true
 	;   shell(['mkdir -p ', ExtractedPath]),
 	    shell(['unzip -q -u ', ZipFile, ' -d ', ExtractedPath])).
 
+/**
+ * Output will be input with any period characters replaced by slashes
+ */
 atom_dot_to_slash(Input, Output) :-
 	atom_codes(Input, InputCodes),
 	dot_to_slash(InputCodes, OutputCodes),
@@ -114,11 +192,14 @@ dot_to_slash([],[]).
 dot_to_slash([D|RestIn], [S|RestOut]) :- "."=[D],"/"=[S],!, dot_to_slash(RestIn,RestOut).
 dot_to_slash([X|RestIn],[X|RestOut]) :- dot_to_slash(RestIn,RestOut).
 
-create_temp_file(TempFile) :-
+/**
+ * Returns a path to a file that does not yet exist
+ */
+generate_temp_filename(TempFile) :-
     get_temp_dir(TempDir),
-    create_temp_file(TempDir, TempFile).
+    generate_temp_filename(TempDir, TempFile).
 
-create_temp_file(Prefix, TempFile) :-
+generate_temp_filename(Prefix, TempFile) :-
    repeat,
    coninc('_tmp_file_cnt', X),
    number_codes(X, Xc),
@@ -127,6 +208,10 @@ create_temp_file(Prefix, TempFile) :-
    ->  fail
    ;   !,true).
 
+/**
+ * Returns a directory to use for temporary files
+ * (this lives under the .xsbmodules directory)
+ */
 get_temp_dir(TempDir) :-
     module_cache_dir(ModuleCacheDir),
     concat_atom([ModuleCacheDir, '/', tmp], TempDir),
